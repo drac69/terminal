@@ -1,0 +1,55 @@
+# Build Windows Terminal (microsoft/terminal) on GitHub Actions
+#
+# Based on the repo's own documented build path:
+#   - README.md  -> Import-Module .\tools\OpenConsole.psm1; Set-MsBuildDevEnvironment; Invoke-OpenConsoleBuild
+#   - tools/bcz.cmd -> msbuild OpenConsole.slnx /t:Clean;Build /m /p:Configuration=... /p:Platform=...
+#
+# Requirements (from README + .vsconfig): VS 2026 18.6+, Win11 SDK 10.0.26100.8249+,
+# Desktop C++ + WinUI workloads, .NET Framework 4.7.2 targeting pack.
+# The windows-latest runner image (migrated to VS2026 in June 2026) satisfies these.
+
+name: Build Windows Terminal
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # some versioning targets inspect git history
+
+      # The NuGet.Config points at the public Azure DevOps feed
+      # https://pkgs.dev.azure.com/shine-oss/terminal/_packaging/TerminalDependencies@Local
+      # which is anonymously readable, so plain restore works.
+      - name: NuGet restore
+        run: |
+          nuget restore OpenConsole.slnx
+          nuget restore dep\nuget\packages.config
+
+      - name: Build (Release x64, no signed package)
+        shell: pwsh
+        run: |
+          Import-Module .\tools\OpenConsole.psm1
+          # no -Arch switch; arch is auto-detected from PROCESSOR_ARCHITECTURE
+          Set-MsbuildDevEnvironment
+          # extra args are splatted straight to msbuild by Invoke-OpenConsoleBuild
+          Invoke-OpenConsoleBuild /m /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=false /p:AppxPackageSigningEnabled=false
+
+      - name: Zip output
+        shell: pwsh
+        run: |
+          Compress-Archive -Path bin\x64\Release\* -DestinationPath terminal-x64-Release.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-x64-Release
+          path: terminal-x64-Release.zip

@@ -59,7 +59,7 @@ jobs:
           nuget restore OpenConsole.slnx
           nuget restore dep\nuget\packages.config
 
-      - name: Build solution (Release, x64, NO appx generation, no PDBs)
+      - name: Build solution (Release, x64, NO appx generation, PDBs ON)
         shell: pwsh
         run: |
           Import-Module .\tools\OpenConsole.psm1
@@ -76,12 +76,12 @@ jobs:
           # exist before consumers compile.
           # WindowsTerminalBranding=Canary matches microsoft's own "Portable ZIP"
           # distribution (Canary build, Package-Can.appxmanifest, Canary AUMID).
-          # The default branding is Dev, which is not what the portable zip ships as.
+          # PDBs are ENABLED (we are debugging an abort-on-startup crash, and the
+          # dumps are unresolvable without symbols). Small link-time cost only.
           Invoke-OpenConsoleBuild /m `
             /p:Configuration=Release /p:Platform=x64 `
             /p:WindowsTerminalBranding=Canary `
-            /p:GenerateAppxPackageOnBuild=false `
-            /p:DebugSymbols=false /p:DebugType=none
+            /p:GenerateAppxPackageOnBuild=false
 
       - name: Package layout (wapproj only, appx on, no project rebuild)
         shell: pwsh
@@ -131,9 +131,49 @@ jobs:
             throw "No package layout dir found (see AppxManifest.xml locations above)"
           }
           Write-Host "Layout: $($layoutDir.FullName)"
+
+          # MERGE the WindowsTerminal project output into the layout dir.
+          # Step 2 built the wapproj with /p:BuildProjectReferences=false, which
+          # avoids recompiling (no C1083) but also makes the wapproj's staging
+          # skip NuGet-provided content — most importantly Microsoft.UI.Xaml.dll
+          # (from the Microsoft.UI.Xaml.2.8.4 package), which the WindowsTerminal
+          # project copies into ITS output during step 1. Without it the app
+          # loads the OS XAML host but fast-fails (0xc0000409) when it can't
+          # initialize the WinUI control. Copying the whole WindowsTerminal
+          # output dir on top of the layout guarantees completeness.
+          $wtOut = "$PWD\bin\x64\Release\WindowsTerminal"
+          if (-not (Test-Path $wtOut)) { throw "WindowsTerminal output not found: $wtOut" }
+          Write-Host "Merging $wtOut into layout"
+          Copy-Item -Path "$wtOut\*" -Destination $layoutDir.FullName -Recurse -Force
+
+          # Sanity check: refuse to ship a layout missing the DLL we just fixed.
+          if (-not (Test-Path (Join-Path $layoutDir.FullName 'Microsoft.UI.Xaml.dll'))) {
+            throw "Microsoft.UI.Xaml.dll still missing after merge — aborting"
+          }
+
           Compress-Archive -Path (Join-Path $layoutDir.FullName '*') `
             -DestinationPath WindowsTerminal-x64-portable.zip
           Get-Item WindowsTerminal-x64-portable.zip | Format-Table Name, Length
+
+      - name: Collect PDBs (for crash-dump symbol resolution)
+        shell: pwsh
+        run: |
+          # Gather the PDBs needed to resolve the abort-on-startup crash dumps.
+          # WindowsTerminal.pdb (host exe, where the throw lives) + the app DLLs
+          # that load early. Compressed as a separate artifact, NOT in the zip
+          # users run.
+          $pdbRoot = "$PWD\bin\x64\Release"
+          $pdbs = @(
+            'WindowsTerminal\WindowsTerminal.pdb',
+            'WindowsTerminal\TerminalApp.pdb',
+            'WindowsTerminal\Microsoft.Terminal.Control.pdb',
+            'WindowsTerminal\TerminalThemeHelpers.pdb',
+            'WindowsTerminal\TerminalSettingsModel.pdb',
+            'WindowsTerminal\TerminalConnection.pdb'
+          ) | ForEach-Object { Join-Path $pdbRoot $_ } | Where-Object { Test-Path $_ }
+          if (-not $pdbs) { throw "No PDBs found under $pdbRoot" }
+          Compress-Archive -Path $pdbs -DestinationPath WindowsTerminal-x64-symbols.zip
+          Get-Item WindowsTerminal-x64-symbols.zip | Format-Table Name, Length
 
       # Release downloads come from GitHub's CDN (objects.githubusercontent.com)
       # and are much faster than workflow-artifact downloads.
@@ -142,18 +182,25 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Windows Terminal ${{ inputs.ref || github.sha }} (build ${{ github.run_number }})
-          files: WindowsTerminal-x64-portable.zip
+          files: |
+            WindowsTerminal-x64-portable.zip
+            WindowsTerminal-x64-symbols.zip
           body: |
-            Portable build of microsoft/terminal — Release, x64 only, no debug symbols.
+            Portable build of microsoft/terminal — Release, x64 only, Canary branding.
             Commit: ${{ github.sha }}
 
             **Usage:**
             * Extract anywhere and run `WindowsTerminal.exe` from the extracted folder.
             * No install, no Developer Mode, no admin rights needed.
 
+            `WindowsTerminal-x64-symbols.zip` is the matching PDB set — keep it only
+            if you need to decode a crash dump; it is not needed to run the app.
+
       # kept as a fallback for debugging; delete this step if you don't need it
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: terminal-x64-portable
-          path: WindowsTerminal-x64-portable.zip
+          path: |
+            WindowsTerminal-x64-portable.zip
+            WindowsTerminal-x64-symbols.zip

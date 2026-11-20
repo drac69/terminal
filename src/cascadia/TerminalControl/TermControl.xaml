@@ -118,7 +118,7 @@
             (GH#9218), where we might need this anyways.
         -->
 
-        <x:Double x:Key="ScrollBarSize">16</x:Double>
+        <x:Double x:Key="ScrollBarSize">26</x:Double>
         <x:String x:Key="ScrollBarExpandBeginTime">0</x:String>
 
         <Style x:Key="ForkedScrollbarTemplate"

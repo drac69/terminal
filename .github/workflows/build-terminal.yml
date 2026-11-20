@@ -60,12 +60,16 @@ jobs:
           Import-Module .\tools\OpenConsole.psm1
           # arch is auto-detected from PROCESSOR_ARCHITECTURE (x64 on this runner)
           Set-MsbuildDevEnvironment
+          # NOTE: can't use Invoke-OpenConsoleBuild for this — it hardcodes
+          # OpenConsole.slnx as the first msbuild arg, so passing the .wapproj
+          # too fails with MSB1008 ("Only one project can be specified").
+          # Set-MsbuildDevEnvironment puts msbuild on the PATH, so call it directly.
           # The package project auto-disables signing because CascadiaPackage_TemporaryKey.pfx
           # does not exist in the repo, so no cert is needed in CI.
           # Building only the .wapproj pulls in every project the package needs and
           # skips test projects — much faster than a full OpenConsole.slnx build.
           # DebugSymbols=false / DebugType=none skips PDB generation.
-          Invoke-OpenConsoleBuild src\cascadia\CascadiaPackage\CascadiaPackage.wapproj /t:Build `
+          msbuild.exe src\cascadia\CascadiaPackage\CascadiaPackage.wapproj /t:Build `
             /m /p:Configuration=Release /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `

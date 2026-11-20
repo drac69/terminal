@@ -59,16 +59,29 @@ jobs:
           nuget restore OpenConsole.slnx
           nuget restore dep\nuget\packages.config
 
-      - name: Build (Release, x64, no signing, no PDBs)
+      - name: Build (Release, x64, package target only, no PDBs)
         shell: pwsh
         run: |
           Import-Module .\tools\OpenConsole.psm1
           # arch is auto-detected from PROCESSOR_ARCHITECTURE (x64 on this runner)
           Set-MsbuildDevEnvironment
           # Invoke-OpenConsoleBuild = nuget restore + msbuild OpenConsole.slnx @args.
+          #
+          # /t:CascadiaPackage builds ONLY the package project + its transitive
+          # references, via the solution metaproj. This is the important bit:
+          #   - It skips all LocalTests_* / UnitTests_* / TestHostApp projects, so
+          #     we never hit APPX0703 ("Manifest references 'taef.png'") which
+          #     only fires on the test host apps' _ValidateAppxPackage target.
+          #   - Building through the solution (not the bare .wapproj) keeps
+          #     solution-level code-gen ordering, so generated headers like
+          #     winrt/Microsoft.Terminal.Settings.Model.h and ITerminalHandoff.h
+          #     exist before their consumers compile (no C1083).
+          #   - It still runs the packaging targets, which produce the unpacked
+          #     layout (resources.pri + XAML resources) — that layout is what the
+          #     portable zip needs to run without being installed.
           # The package project auto-disables signing because
           # CascadiaPackage_TemporaryKey.pfx does not exist in the repo.
-          Invoke-OpenConsoleBuild /m `
+          Invoke-OpenConsoleBuild /t:CascadiaPackage /m `
             /p:Configuration=Release /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `

@@ -132,6 +132,48 @@ jobs:
           }
           Write-Host "Layout: $($layoutDir.FullName)"
 
+          # Copy the WinUI runtime files (Microsoft.UI.Xaml.dll + .winmd + .pri
+          # + resources folder) into the layout. The exe's EMBEDDED manifest
+          # (generated at link time by build\rules\GenerateSxsManifestsFromWinmds
+          # .targets via mt.exe) declares activatableClass entries for
+          # Microsoft.UI.Xaml.* with Implementation=Microsoft.UI.Xaml.dll, and
+          # reg-free activation loads that DLL from the exe's directory. Without
+          # it, XAML Islands init throws REGDB_E_CLASSNOTREG (0x80040154) ->
+          # terminate -> abort (0xc0000409 / FAST_FAIL_FATAL_APP_EXIT).
+          # BuildProjectReferences=false on the wapproj skips the package's
+          # content-copy target, so the DLL never lands in bin\ — we take it
+          # from the restored NuGet package instead.
+          # NOTE: PowerShell -Filter 'Microsoft.UI.Xaml.*' also FAT-matches the
+          # bare unversioned 'microsoft.ui.xaml' folder, so enumerate ALL
+          # matches and take the first that actually contains the DLL.
+          $winuiFound = $false
+          foreach ($root in @("$PWD\packages", "$env:USERPROFILE\.nuget\packages", $env:NUGET_PACKAGES)) {
+            if (-not $root -or -not (Test-Path $root)) { continue }
+            $pkgDirs = Get-ChildItem -Path $root -Directory -Filter 'Microsoft.UI.Xaml.*' -ErrorAction SilentlyContinue
+            foreach ($p in $pkgDirs) {
+              $dll = Get-ChildItem -Path $p.FullName -Recurse -File -Filter 'Microsoft.UI.Xaml.dll' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($dll) {
+                Write-Host "WinUI runtime source: $($dll.FullName)"
+                Copy-Item -Path $dll.FullName -Destination $layoutDir.FullName -Force
+                Get-ChildItem -Path $dll.DirectoryName -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -in 'Microsoft.UI.Xaml.pri', 'Microsoft.UI.Xaml.winmd' } |
+                  Copy-Item -Destination $layoutDir.FullName -Force
+                Get-ChildItem -Path $dll.DirectoryName -Directory -Filter 'Microsoft.UI.Xaml' -ErrorAction SilentlyContinue |
+                  Copy-Item -Destination $layoutDir.FullName -Recurse -Force
+                $winuiFound = $true
+                break
+              }
+            }
+            if ($winuiFound) { break }
+          }
+          if (-not $winuiFound) {
+            # Warn loudly but do NOT fail the job — never block the artifact
+            # over this again. The zip will still be produced (and will crash
+            # at XAML init if the DLL is genuinely absent).
+            Write-Host "##vso[task.logissue type=warning]Microsoft.UI.Xaml.dll not found in any NuGet package root — WinUI classes will fail to activate (REGDB_E_CLASSNOTREG) at startup"
+          }
+
           Compress-Archive -Path (Join-Path $layoutDir.FullName '*') `
             -DestinationPath WindowsTerminal-x64-portable.zip
           Get-Item WindowsTerminal-x64-portable.zip | Format-Table Name, Length

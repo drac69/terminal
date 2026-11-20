@@ -122,7 +122,6 @@
         <x:Double x:Key="ScrollBarVerticalThumbMinWidth">26</x:Double>
         <x:Double x:Key="ScrollBarThumbOffset">0</x:Double>
         <x:String x:Key="ScrollBarExpandBeginTime">0</x:String>
-        <x:String x:Key="ScrollBarExpandBeginTime">0</x:String>
 
         <Style x:Key="ForkedScrollbarTemplate"
                TargetType="ScrollBar">

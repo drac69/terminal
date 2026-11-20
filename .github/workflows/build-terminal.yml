@@ -59,33 +59,50 @@ jobs:
           nuget restore OpenConsole.slnx
           nuget restore dep\nuget\packages.config
 
-      - name: Build (Release, x64, package target only, no PDBs)
+      - name: Build solution (Release, x64, NO appx generation, no PDBs)
         shell: pwsh
         run: |
           Import-Module .\tools\OpenConsole.psm1
           # arch is auto-detected from PROCESSOR_ARCHITECTURE (x64 on this runner)
           Set-MsbuildDevEnvironment
-          # Invoke-OpenConsoleBuild = nuget restore + msbuild OpenConsole.slnx @args.
+          # Step 1 of 2: full solution compile with GenerateAppxPackageOnBuild=false.
+          # This is the known-good build (your first run succeeded this way).
+          # Keeping appx generation OFF here is what avoids APPX0703 on the test
+          # host apps (TestHostApp's _ValidateAppxPackage only runs when appx
+          # generation is enabled, and it references taef.png from the TAEF
+          # framework that isn't installed on the runner).
+          # Solution-level code-gen ordering is preserved, so generated headers
+          # (winrt/Microsoft.Terminal.Settings.Model.h, ITerminalHandoff.h, ...)
+          # exist before consumers compile.
+          Invoke-OpenConsoleBuild /m `
+            /p:Configuration=Release /p:Platform=x64 `
+            /p:GenerateAppxPackageOnBuild=false `
+            /p:DebugSymbols=false /p:DebugType=none
+
+      - name: Package layout (wapproj only, appx on, no project rebuild)
+        shell: pwsh
+        run: |
+          Import-Module .\tools\OpenConsole.psm1
+          Set-MsbuildDevEnvironment
+          # Step 2 of 2: build ONLY CascadiaPackage.wapproj to run the packaging
+          # targets and produce the unpacked layout (resources.pri + XAML
+          # resources) that makes WindowsTerminal.exe run unpackaged.
           #
-          # /t:CascadiaPackage builds ONLY the package project + its transitive
-          # references, via the solution metaproj. This is the important bit:
-          #   - It skips all LocalTests_* / UnitTests_* / TestHostApp projects, so
-          #     we never hit APPX0703 ("Manifest references 'taef.png'") which
-          #     only fires on the test host apps' _ValidateAppxPackage target.
-          #   - Building through the solution (not the bare .wapproj) keeps
-          #     solution-level code-gen ordering, so generated headers like
-          #     winrt/Microsoft.Terminal.Settings.Model.h and ITerminalHandoff.h
-          #     exist before their consumers compile (no C1083).
-          #   - It still runs the packaging targets, which produce the unpacked
-          #     layout (resources.pri + XAML resources) — that layout is what the
-          #     portable zip needs to run without being installed.
+          # /p:BuildProjectReferences=false  -> do NOT rebuild referenced
+          #   projects; reuse the binaries from step 1. This is the key: no
+          #   recompile means no C1083 (generated-header ordering only matters
+          #   during compilation), and the wapproj doesn't pull in test projects
+          #   so no APPX0703. It only runs MakePri + MakeAppx staging.
+          # /p:SolutionDir  -> required when building a bare project (msbuild
+          #   only auto-defines it for solution builds); with trailing backslash.
           # The package project auto-disables signing because
           # CascadiaPackage_TemporaryKey.pfx does not exist in the repo.
-          Invoke-OpenConsoleBuild /t:CascadiaPackage /m `
+          msbuild.exe src\cascadia\CascadiaPackage\CascadiaPackage.wapproj /t:Build `
+            /m "/p:SolutionDir=$PWD\" `
+            /p:BuildProjectReferences=false `
             /p:Configuration=Release /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `
-            /p:DebugSymbols=false /p:DebugType=none `
             "/p:AppxPackageDir=$PWD\msix\"
 
       - name: Collect portable zip

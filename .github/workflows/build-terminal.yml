@@ -15,6 +15,10 @@ on:
   push:
     branches: [main]
 
+# needed to create a release via the GitHub API
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -48,6 +52,20 @@ jobs:
         run: |
           Compress-Archive -Path bin\x64\Release\* -DestinationPath terminal-x64-Release.zip
 
+      # Release downloads come from GitHub's CDN (objects.githubusercontent.com)
+      # and are much faster than workflow-artifact downloads.
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Windows Terminal ${{ github.sha }} (build ${{ github.run_number }})
+          files: terminal-x64-Release.zip
+          body: |
+            Unsigned CI build of microsoft/terminal (Release x64).
+            Commit: ${{ github.sha }}
+            Install note: this is an unsigned build — to sideload it, enable Developer Mode in Windows Settings.
+
+      # kept as a fallback for debugging; delete this step if you don't need it
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -1,19 +1,24 @@
 # Build Windows Terminal (microsoft/terminal) on GitHub Actions
 #
-# Produces TWO artifacts:
-#   - WindowsTerminal-x64-Release.msix  : the installable MSIX package (unsigned)
-#   - WindowsTerminal-x64-portable.zip  : portable zip of the packaged layout
-#     (this is what microsoft's own Canary "Portable ZIP" distribution is — the
-#     unpacked package layout incl. resources.pri + XAML resources, which is what
-#     makes WindowsTerminal.exe run WITHOUT package identity. The loose
-#     bin\x64\Release output does NOT work unpackaged: it fast-fails 0xC0000409
-#     because it lacks resources.pri / XAML resources.)
+# Produces ONE artifact:
+#   - WindowsTerminal-x64-portable.zip : portable zip of the unpacked package
+#     layout (what microsoft's own Canary "Portable ZIP" distribution is:
+#     AppxManifest.xml + resources.pri + XAML resources + exes/dlls — this is
+#     what makes WindowsTerminal.exe run WITHOUT being installed).
+#     The loose bin\x64\Release output does NOT work unpackaged: it fast-fails
+#     0xC0000409 because it lacks resources.pri / XAML resources.
 #
-# Efficiency notes:
-#   - Only the CascadiaPackage.wapproj graph is built (not the full solution) —
-#     this skips test projects and everything the package doesn't reference.
-#   - /p:DebugSymbols=false /p:DebugType=none — no PDB generation.
-#   - Release configuration, x64 only (no x86 / ARM64 builds).
+# Why the FULL solution is built (not just the .wapproj):
+#   Several generated headers (winrt/Microsoft.Terminal.Settings.Model.h,
+#   ITerminalHandoff.h, ...) are produced by other projects and sequenced by
+#   solution-level build order. Building the .wapproj graph alone compiles
+#   consumers before generators -> C1083 failures. The wapproj is part of
+#   OpenConsole.slnx, so GenerateAppxPackageOnBuild=true on the solution build
+#   runs the packaging with correct ordering (SolutionDir is also auto-defined).
+#   The resulting .msix is NOT published — only the zip is.
+#
+# Efficiency: Release configuration, x64 only, /p:DebugSymbols=false +
+# /p:DebugType=none (no PDB generation).
 #
 # Requirements (README + .vsconfig): VS 2026 18.6+, Win11 SDK 10.0.26100.8249+,
 # Desktop C++ + WinUI workloads. windows-latest (VS 2026 since June 2026) covers these.
@@ -37,7 +42,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -54,54 +59,46 @@ jobs:
           nuget restore OpenConsole.slnx
           nuget restore dep\nuget\packages.config
 
-      - name: Build MSIX + package layout (Release, x64, unsigned)
+      - name: Build (Release, x64, no signing, no PDBs)
         shell: pwsh
         run: |
           Import-Module .\tools\OpenConsole.psm1
           # arch is auto-detected from PROCESSOR_ARCHITECTURE (x64 on this runner)
           Set-MsbuildDevEnvironment
-          # NOTE: can't use Invoke-OpenConsoleBuild for this — it hardcodes
-          # OpenConsole.slnx as the first msbuild arg, so passing the .wapproj
-          # too fails with MSB1008 ("Only one project can be specified").
-          # Set-MsbuildDevEnvironment puts msbuild on the PATH, so call it directly.
-          # The package project auto-disables signing because CascadiaPackage_TemporaryKey.pfx
-          # does not exist in the repo, so no cert is needed in CI.
-          # Building only the .wapproj pulls in every project the package needs and
-          # skips test projects — much faster than a full OpenConsole.slnx build.
-          # DebugSymbols=false / DebugType=none skips PDB generation.
-          # SolutionDir: msbuild only auto-defines it when building a solution;
-          # for a bare .wapproj we must supply it (WITH trailing backslash) or
-          # imports like "$(SolutionDir)common.openconsole.props" resolve to
-          # relative garbage -> MSB4019.
-          msbuild.exe src\cascadia\CascadiaPackage\CascadiaPackage.wapproj /t:Build `
-            /m "/p:SolutionDir=$PWD\" `
+          # Invoke-OpenConsoleBuild = nuget restore + msbuild OpenConsole.slnx @args.
+          # The package project auto-disables signing because
+          # CascadiaPackage_TemporaryKey.pfx does not exist in the repo.
+          Invoke-OpenConsoleBuild /m `
             /p:Configuration=Release /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `
             /p:DebugSymbols=false /p:DebugType=none `
             "/p:AppxPackageDir=$PWD\msix\"
 
-      - name: Collect outputs (msix + portable zip)
+      - name: Collect portable zip
         shell: pwsh
         run: |
-          # 1. the MSIX itself, wherever the packaging landed it
-          $msix = Get-ChildItem -Recurse -Filter *.msix msix\ | Select-Object -First 1
-          Copy-Item $msix.FullName WindowsTerminal-x64-Release.msix
-
-          # 2. portable zip = the UNPACKED package layout (a directory containing
-          #    AppxManifest.xml + WindowsTerminal.exe + resources.pri ...).
-          #    Zipping that layout is exactly what the official Canary
-          #    "Portable ZIP" distribution is.
-          $layoutDir = Get-ChildItem -Recurse -Directory msix\ |
-            Where-Object { (Test-Path (Join-Path $_.FullName 'AppxManifest.xml')) -and
-                           (Test-Path (Join-Path $_.FullName 'WindowsTerminal.exe')) } |
-            Select-Object -First 1
-          if (-not $layoutDir) { throw "No package layout dir found under msix\" }
+          # The unpacked package layout: a directory containing BOTH
+          # AppxManifest.xml and WindowsTerminal.exe (+ resources.pri ...).
+          # GenerateAppxPackageOnBuild puts it under msix\; fall back to a
+          # repo-wide search just in case.
+          $candidates = @()
+          foreach ($root in @("$PWD\msix", $PWD)) {
+            $candidates += Get-ChildItem -Recurse -Directory $root -ErrorAction SilentlyContinue |
+              Where-Object { (Test-Path (Join-Path $_.FullName 'AppxManifest.xml')) -and
+                             (Test-Path (Join-Path $_.FullName 'WindowsTerminal.exe')) }
+            if ($candidates) { break }
+          }
+          $layoutDir = $candidates | Select-Object -First 1
+          if (-not $layoutDir) {
+            Get-ChildItem -Recurse -Filter AppxManifest.xml -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName
+            throw "No package layout dir found (see AppxManifest.xml locations above)"
+          }
+          Write-Host "Layout: $($layoutDir.FullName)"
           Compress-Archive -Path (Join-Path $layoutDir.FullName '*') `
             -DestinationPath WindowsTerminal-x64-portable.zip
-
-          Get-Item WindowsTerminal-x64-Release.msix, WindowsTerminal-x64-portable.zip |
-            Format-Table Name, Length
+          Get-Item WindowsTerminal-x64-portable.zip | Format-Table Name, Length
 
       # Release downloads come from GitHub's CDN (objects.githubusercontent.com)
       # and are much faster than workflow-artifact downloads.
@@ -110,26 +107,18 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Windows Terminal ${{ inputs.ref || github.sha }} (build ${{ github.run_number }})
-          files: |
-            WindowsTerminal-x64-portable.zip
-            WindowsTerminal-x64-Release.msix
+          files: WindowsTerminal-x64-portable.zip
           body: |
-            Unsigned CI build of microsoft/terminal — Release, x64 only, no debug symbols.
+            Portable build of microsoft/terminal — Release, x64 only, no debug symbols.
             Commit: ${{ github.sha }}
 
-            **Portable (WindowsTerminal-x64-portable.zip):**
-            * Extract anywhere and run `WindowsTerminal\WindowsTerminal.exe` from the
-              extracted folder. No install, no Developer Mode needed.
-
-            **Installable (WindowsTerminal-x64-Release.msix):**
-            * Enable Developer Mode: Settings → System → For developers → ON
-            * PowerShell: `Add-AppxPackage .\WindowsTerminal-x64-Release.msix`
+            **Usage:**
+            * Extract anywhere and run `WindowsTerminal.exe` from the extracted folder.
+            * No install, no Developer Mode, no admin rights needed.
 
       # kept as a fallback for debugging; delete this step if you don't need it
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: terminal-x64-Release
-          path: |
-            WindowsTerminal-x64-portable.zip
-            WindowsTerminal-x64-Release.msix
+          name: terminal-x64-portable
+          path: WindowsTerminal-x64-portable.zip

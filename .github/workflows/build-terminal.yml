@@ -29,9 +29,9 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Branch or tag to build (e.g. v1.27.2950.0). Empty = default branch.'
+        description: 'Branch / tag / commit SHA to build. Default pins to a 1.25 release-branch commit.'
         required: false
-        default: ''
+        default: 'f88b209f1e57e1d8ca35977260c3cddacccaeb31'
   push:
     branches: [main]
 
@@ -74,8 +74,12 @@ jobs:
           # Solution-level code-gen ordering is preserved, so generated headers
           # (winrt/Microsoft.Terminal.Settings.Model.h, ITerminalHandoff.h, ...)
           # exist before consumers compile.
+          # WindowsTerminalBranding=Canary matches microsoft's own "Portable ZIP"
+          # distribution (Canary build, Package-Can.appxmanifest, Canary AUMID).
+          # The default branding is Dev, which is not what the portable zip ships as.
           Invoke-OpenConsoleBuild /m `
             /p:Configuration=Release /p:Platform=x64 `
+            /p:WindowsTerminalBranding=Canary `
             /p:GenerateAppxPackageOnBuild=false `
             /p:DebugSymbols=false /p:DebugType=none
 
@@ -101,6 +105,7 @@ jobs:
             /m "/p:SolutionDir=$PWD\" `
             /p:BuildProjectReferences=false `
             /p:Configuration=Release /p:Platform=x64 `
+            /p:WindowsTerminalBranding=Canary `
             /p:GenerateAppxPackageOnBuild=true /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `
             "/p:AppxPackageDir=$PWD\msix\"

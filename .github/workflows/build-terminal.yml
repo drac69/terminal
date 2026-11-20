@@ -132,19 +132,38 @@ jobs:
           }
           Write-Host "Layout: $($layoutDir.FullName)"
 
-          # MERGE the WindowsTerminal project output into the layout dir.
+          # MERGE every built DLL into the layout, then add the WinUI assets.
           # Step 2 built the wapproj with /p:BuildProjectReferences=false, which
           # avoids recompiling (no C1083) but also makes the wapproj's staging
-          # skip NuGet-provided content — most importantly Microsoft.UI.Xaml.dll
-          # (from the Microsoft.UI.Xaml.2.8.4 package), which the WindowsTerminal
-          # project copies into ITS output during step 1. Without it the app
-          # loads the OS XAML host but fast-fails (0xc0000409) when it can't
-          # initialize the WinUI control. Copying the whole WindowsTerminal
-          # output dir on top of the layout guarantees completeness.
-          $wtOut = "$PWD\bin\x64\Release\WindowsTerminal"
-          if (-not (Test-Path $wtOut)) { throw "WindowsTerminal output not found: $wtOut" }
-          Write-Host "Merging $wtOut into layout"
-          Copy-Item -Path "$wtOut\*" -Destination $layoutDir.FullName -Recurse -Force
+          # skip NuGet-provided content. The big one is Microsoft.UI.Xaml.dll
+          # (from the Microsoft.UI.Xaml.2.8.4 NuGet package): it is copied into
+          # the output of whichever project references WinUI (TerminalApp), NOT
+          # the host exe's folder — so we can't merge a single fixed dir.
+          # Instead, flatten every *.dll built anywhere under bin\x64\Release
+          # (excluding obj\) into the layout. Same-named DLLs are identical
+          # across project outputs, so overwrites are harmless. We deliberately
+          # do NOT copy *.pri here (that would clobber the package's own
+          # resources.pri); the WinUI .pri is handled separately below.
+          $buildRoot = "$PWD\bin\x64\Release"
+          if (-not (Test-Path $buildRoot)) { throw "Build output root not found: $buildRoot" }
+          $dlls = Get-ChildItem -Path $buildRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -eq '.dll' -and $_.FullName -notlike '*\obj\*' }
+          Write-Host "Copying $($dlls.Count) DLL(s) into layout"
+          $dlls | Copy-Item -Destination $layoutDir.FullName -Force
+
+          # WinUI ships Microsoft.UI.Xaml.dll + Microsoft.UI.Xaml.pri + a
+          # Microsoft.UI.Xaml\ resources folder together in the referencing
+          # project's output. Find that directory and copy the .pri and the
+          # subfolder (the DLL itself is already covered above).
+          $xamlDll = $dlls | Where-Object { $_.Name -eq 'Microsoft.UI.Xaml.dll' } | Select-Object -First 1
+          if ($xamlDll) {
+            $xamlDir = $xamlDll.DirectoryName
+            Write-Host "WinUI content dir: $xamlDir"
+            Get-ChildItem -Path $xamlDir -File -Filter 'Microsoft.UI.Xaml.pri' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $layoutDir.FullName -Force
+            Get-ChildItem -Path $xamlDir -Directory -Filter 'Microsoft.UI.Xaml' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $layoutDir.FullName -Recurse -Force
+          }
 
           # Sanity check: refuse to ship a layout missing the DLL we just fixed.
           if (-not (Test-Path (Join-Path $layoutDir.FullName 'Microsoft.UI.Xaml.dll'))) {
